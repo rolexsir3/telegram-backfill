@@ -44,8 +44,29 @@ async def main():
     client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
     await client.start()  # prompts for phone number + login code on first run only
 
-    source = await client.get_entity(SOURCE_CHANNEL)
-    dest = await client.get_entity(DEST_CHANNEL)
+    # Telethon can only resolve a raw numeric ID into a usable entity if
+    # it has already seen that chat this session (e.g. via a dialog list).
+    # A fresh login has no such cache yet, so fetch it here first -- this
+    # is required for numeric IDs to work, and harmless for @usernames.
+    print("Fetching your dialog list so channel IDs can be resolved...")
+    await client.get_dialogs()
+
+    try:
+        source = await client.get_entity(SOURCE_CHANNEL)
+    except ValueError:
+        raise SystemExit(
+            f"Could not find {SOURCE_CHANNEL} among your dialogs. "
+            "Make sure your account is a member of the source channel, "
+            "and that the ID/username is correct."
+        )
+    try:
+        dest = await client.get_entity(DEST_CHANNEL)
+    except ValueError:
+        raise SystemExit(
+            f"Could not find {DEST_CHANNEL} among your dialogs. "
+            "Make sure your account is a member (with posting rights) "
+            "of the destination channel, and that the ID/username is correct."
+        )
 
     count = 0
     skipped = 0
