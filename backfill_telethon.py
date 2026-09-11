@@ -30,8 +30,20 @@ from telethon.errors import FloodWaitError
 
 API_ID = int(os.environ.get("TG_API_ID", "0"))
 API_HASH = os.environ.get("TG_API_HASH", "")
-SOURCE_CHANNEL = os.environ.get("SOURCE_CHANNEL", "@source_channel_username")
-DEST_CHANNEL = os.environ.get("DEST_CHANNEL", "@dest_channel_username")
+
+
+def _resolve_channel(value):
+    """Numeric strings (IDs) must become int, or Telethon treats them
+    as a username/phone lookup instead of a raw peer ID -- which fails
+    even when your account is genuinely a member of that chat."""
+    try:
+        return int(value)
+    except ValueError:
+        return value  # leave @usernames as-is
+
+
+SOURCE_CHANNEL = _resolve_channel(os.environ.get("SOURCE_CHANNEL", "@source_channel_username"))
+DEST_CHANNEL = _resolve_channel(os.environ.get("DEST_CHANNEL", "@dest_channel_username"))
 
 SESSION_NAME = "backfill_session"
 DELAY_BETWEEN_FORWARDS = 1.5  # seconds -- keep this gentle to avoid flood limits
