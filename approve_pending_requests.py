@@ -24,7 +24,7 @@ Setup:
 import asyncio
 import os
 
-from telethon import TelegramClient, functions
+from telethon import TelegramClient, functions, types
 from telethon.errors import FloodWaitError
 
 API_ID = int(os.environ.get("TG_API_ID", "0"))
@@ -70,22 +70,43 @@ async def main():
         )
 
     log(f"Approving all pending join requests for {CHANNEL}...")
-    try:
-        await client(functions.messages.HideAllChatJoinRequestsRequest(
+    total_rounds = 0
+    MAX_ROUNDS = 1000  # safety cap -- 1000 rounds x ~100/round is far more than any real backlog
+    while total_rounds < MAX_ROUNDS:
+        total_rounds += 1
+        try:
+            await client(functions.messages.HideAllChatJoinRequestsRequest(
+                peer=chat,
+                approved=True,
+            ))
+        except FloodWaitError as e:
+            log(f"Rate limited, waiting {e.seconds}s...")
+            await asyncio.sleep(e.seconds)
+            continue
+        except Exception as e:
+            log(f"Failed: {e}")
+            break
+
+        # hideAllChatJoinRequests only clears up to 100 per call, so
+        # check whether any are still pending and loop until none are.
+        await asyncio.sleep(1)
+        remaining = await client(functions.messages.GetChatInviteImportersRequest(
             peer=chat,
-            approved=True,
+            link=None,
+            q="",
+            offset_date=0,
+            offset_user=types.InputUserEmpty(),
+            limit=1,
+            requested=True,
         ))
-        log("Done. All pending join requests approved.")
-    except FloodWaitError as e:
-        log(f"Rate limited, waiting {e.seconds}s, then retrying...")
-        await asyncio.sleep(e.seconds)
-        await client(functions.messages.HideAllChatJoinRequestsRequest(
-            peer=chat,
-            approved=True,
-        ))
-        log("Done. All pending join requests approved.")
-    except Exception as e:
-        log(f"Failed: {e}")
+        log(f"Round {total_rounds}: cleared a batch, {len(remaining.importers)} still pending check...")
+        if not remaining.importers:
+            break
+
+    if total_rounds >= MAX_ROUNDS:
+        log(f"Stopped after {MAX_ROUNDS} rounds as a safety limit -- there may still be requests pending. Re-run the script to continue.")
+    else:
+        log("Done. No pending join requests remain.")
 
     await client.disconnect()
 
