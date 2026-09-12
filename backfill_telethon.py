@@ -24,9 +24,14 @@ Setup:
 
 import asyncio
 import os
+from datetime import datetime, timedelta
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
+
+
+def log(msg):
+    print(msg, flush=True)
 
 API_ID = int(os.environ.get("TG_API_ID", "0"))
 API_HASH = os.environ.get("TG_API_HASH", "")
@@ -60,7 +65,7 @@ async def main():
     # it has already seen that chat this session (e.g. via a dialog list).
     # A fresh login has no such cache yet, so fetch it here first -- this
     # is required for numeric IDs to work, and harmless for @usernames.
-    print("Fetching your dialog list so channel IDs can be resolved...")
+    log("Fetching your dialog list so channel IDs can be resolved...")
     await client.get_dialogs()
 
     try:
@@ -89,16 +94,28 @@ async def main():
             await client.forward_messages(dest, message)
             count += 1
             if count % 20 == 0:
-                print(f"Forwarded {count} messages so far...")
+                log(f"Forwarded {count} messages so far...")
             await asyncio.sleep(DELAY_BETWEEN_FORWARDS)
         except FloodWaitError as e:
-            print(f"Rate limited by Telegram, waiting {e.seconds}s...")
-            await asyncio.sleep(e.seconds)
+            resume_at = datetime.now() + timedelta(seconds=e.seconds)
+            log(
+                f"Rate limited by Telegram after {count} forwards. "
+                f"Waiting {e.seconds}s (resuming around {resume_at:%H:%M:%S})..."
+            )
+            # sleep in chunks so you get a heartbeat instead of long silence
+            remaining = e.seconds
+            while remaining > 0:
+                chunk = min(60, remaining)
+                await asyncio.sleep(chunk)
+                remaining -= chunk
+                if remaining > 0:
+                    log(f"...still waiting, {remaining}s left")
+            log("Resuming.")
         except Exception as e:
             skipped += 1
-            print(f"Skipped message {message.id}: {e}")
+            log(f"Skipped message {message.id}: {e}")
 
-    print(f"Done. Forwarded {count} messages, skipped {skipped}.")
+    log(f"Done. Forwarded {count} messages, skipped {skipped}.")
     await client.disconnect()
 
 
