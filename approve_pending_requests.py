@@ -26,6 +26,7 @@ import os
 
 from telethon import TelegramClient, functions, types
 from telethon.errors import FloodWaitError
+from telethon.errors.rpcerrorlist import HideRequesterMissingError
 
 API_ID = int(os.environ.get("TG_API_ID", "0"))
 API_HASH = os.environ.get("TG_API_HASH", "")
@@ -51,6 +52,20 @@ def log(msg):
     print(msg, flush=True)
 
 
+async def count_pending(client, chat):
+    """Returns True if at least one join request is still pending."""
+    res = await client(functions.messages.GetChatInviteImportersRequest(
+        peer=chat,
+        link=None,
+        q="",
+        offset_date=0,
+        offset_user=types.InputUserEmpty(),
+        limit=1,
+        requested=True,
+    ))
+    return bool(res.importers)
+
+
 async def main():
     if not API_ID or not API_HASH:
         raise SystemExit("Set TG_API_ID and TG_API_HASH first.")
@@ -69,9 +84,17 @@ async def main():
             "account is an admin of it, and the ID/username is correct."
         )
 
+    if not await count_pending(client, chat):
+        log("No pending join requests to approve -- nothing to do.")
+        await client.disconnect()
+        return
+
     log(f"Approving all pending join requests for {CHANNEL}...")
     total_rounds = 0
-    MAX_ROUNDS = 1000  # safety cap -- 1000 rounds x ~100/round is far more than any real backlog
+    timeouts = 0
+    MAX_ROUNDS = 1000  # safety cap -- far more than any real backlog needs
+    finished = False
+
     while total_rounds < MAX_ROUNDS:
         total_rounds += 1
         try:
@@ -79,34 +102,43 @@ async def main():
                 peer=chat,
                 approved=True,
             ))
+            timeouts = 0
+        except HideRequesterMissingError:
+            # Telegram returns this when there's nothing left pending.
+            finished = True
+            break
         except FloodWaitError as e:
             log(f"Rate limited, waiting {e.seconds}s...")
             await asyncio.sleep(e.seconds)
             continue
+        except (TimeoutError, asyncio.TimeoutError):
+            timeouts += 1
+            if timeouts > 5:
+                log("Too many consecutive timeouts from Telegram -- stopping. Re-run later to continue.")
+                break
+            log(f"Telegram timed out (attempt {timeouts}/5), retrying in 10s...")
+            await asyncio.sleep(10)
+            continue
         except Exception as e:
-            log(f"Failed: {e}")
+            log(f"Unexpected error: {e}")
             break
 
-        # hideAllChatJoinRequests only clears up to 100 per call, so
-        # check whether any are still pending and loop until none are.
         await asyncio.sleep(1)
-        remaining = await client(functions.messages.GetChatInviteImportersRequest(
-            peer=chat,
-            link=None,
-            q="",
-            offset_date=0,
-            offset_user=types.InputUserEmpty(),
-            limit=1,
-            requested=True,
-        ))
-        log(f"Round {total_rounds}: cleared a batch, {len(remaining.importers)} still pending check...")
-        if not remaining.importers:
+        if not await count_pending(client, chat):
+            finished = True
             break
+        log(f"Round {total_rounds} done, more still pending -- continuing...")
 
-    if total_rounds >= MAX_ROUNDS:
-        log(f"Stopped after {MAX_ROUNDS} rounds as a safety limit -- there may still be requests pending. Re-run the script to continue.")
+    if finished:
+        log("Done. All pending join requests have been approved.")
+    elif total_rounds >= MAX_ROUNDS:
+        log(f"Stopped after {MAX_ROUNDS} rounds as a safety limit. Re-run to continue.")
     else:
-        log("Done. No pending join requests remain.")
+        still = await count_pending(client, chat)
+        if still:
+            log("Stopped early -- some requests may still be pending. Re-run to continue.")
+        else:
+            log("Done. All pending join requests have been approved.")
 
     await client.disconnect()
 
