@@ -28,7 +28,7 @@ Setup:
 import asyncio
 import os
 
-from telethon import TelegramClient, functions
+from telethon import TelegramClient, functions, types
 from telethon.errors import FloodWaitError
 from telethon.errors.rpcerrorlist import HideRequesterMissingError
 
@@ -61,6 +61,22 @@ def log(msg):
     print(msg, flush=True)
 
 
+async def has_pending(client, chat):
+    """Authoritative check: is there at least one join request still
+    pending? Used to confirm we're actually done, rather than trusting
+    HideRequesterMissingError alone (see note in main loop)."""
+    res = await client(functions.messages.GetChatInviteImportersRequest(
+        peer=chat,
+        link=None,
+        q="",
+        offset_date=0,
+        offset_user=types.InputUserEmpty(),
+        limit=1,
+        requested=True,
+    ))
+    return bool(res.importers)
+
+
 async def main():
     if not API_ID or not API_HASH:
         raise SystemExit("Set TG_API_ID and TG_API_HASH first.")
@@ -80,7 +96,7 @@ async def main():
         )
 
     log(f"Approving all pending join requests for {CHANNEL}...")
-    log("Each round clears up to ~100. This loops until Telegram reports none left.")
+    log("Each round clears up to ~100. This loops until a fresh check confirms none left.")
 
     total_rounds = 0
     timeouts = 0
@@ -96,12 +112,12 @@ async def main():
             total_rounds += 1
             timeouts = 0
             log(f"Round {total_rounds} cleared (~{total_rounds * 100} approved so far)...")
-            # small pause between rounds to stay under Telegram's limits
-            await asyncio.sleep(DELAY_BETWEEN_ROUNDS)
         except HideRequesterMissingError:
-            # Telegram's definitive "nothing left pending" signal.
-            finished = True
-            break
+            # This fires both when the backlog is genuinely empty AND
+            # when a client-side timeout caused Telethon to silently
+            # retry a request that had already succeeded. Either way,
+            # don't trust it alone -- the explicit check below decides.
+            pass
         except FloodWaitError as e:
             log(f"Rate limited, waiting {e.seconds}s before continuing...")
             await asyncio.sleep(e.seconds)
@@ -117,6 +133,17 @@ async def main():
         except Exception as e:
             log(f"Unexpected error after {total_rounds} rounds: {e}")
             log("Re-run the script to continue where this left off.")
+            break
+
+        await asyncio.sleep(DELAY_BETWEEN_ROUNDS)
+        try:
+            still_pending = await has_pending(client, chat)
+        except Exception as e:
+            log(f"Could not verify remaining count ({e}) -- assuming more may be pending, retrying...")
+            still_pending = True
+
+        if not still_pending:
+            finished = True
             break
 
     if finished:
