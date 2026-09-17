@@ -1,6 +1,10 @@
 """
 One-time sweep: approves ALL currently pending join requests for a
-channel/group in a single call.
+channel/group, looping until Telegram reports none are left.
+
+Telegram's bulk-approve call only clears roughly 100 requests per
+call, so this repeats it until the API returns "nothing left pending".
+For a backlog of a few thousand, expect this to take a few minutes.
 
 Why this needs your personal account (like backfill_telethon.py) and
 not the bot:
@@ -17,15 +21,16 @@ Setup:
 2. pip install -r requirements_backfill.txt (same telethon dependency)
 3. Make sure this account is an admin of the chat with rights to
    manage join requests.
-4. Set CHANNEL and run once. Use join_request_bot.py (the bot)
-   afterward for anything new going forward.
+4. Set CHANNEL and run. Safe to re-run -- it just picks up whatever
+   is still pending.
 """
 
 import asyncio
 import os
 
-from telethon import TelegramClient, functions, types
+from telethon import TelegramClient, functions
 from telethon.errors import FloodWaitError
+from telethon.errors.rpcerrorlist import HideRequesterMissingError
 
 API_ID = int(os.environ.get("TG_API_ID", "0"))
 API_HASH = os.environ.get("TG_API_HASH", "")
@@ -45,6 +50,11 @@ CHANNEL = _resolve_channel(os.environ.get("CHANNEL", "@your_channel_username"))
 # Reuses the same session file as backfill_telethon.py if present --
 # no separate login needed if you already ran that script.
 SESSION_NAME = "backfill_session"
+
+# Pause between bulk-approve rounds. Keep this gentle -- approving
+# thousands of members quickly is exactly the pattern Telegram's
+# anti-spam watches for.
+DELAY_BETWEEN_ROUNDS = 3
 
 
 def log(msg):
@@ -70,43 +80,51 @@ async def main():
         )
 
     log(f"Approving all pending join requests for {CHANNEL}...")
+    log("Each round clears up to ~100. This loops until Telegram reports none left.")
+
     total_rounds = 0
-    MAX_ROUNDS = 1000  # safety cap -- 1000 rounds x ~100/round is far more than any real backlog
+    timeouts = 0
+    MAX_ROUNDS = 5000  # safety cap only
+    finished = False
+
     while total_rounds < MAX_ROUNDS:
-        total_rounds += 1
         try:
             await client(functions.messages.HideAllChatJoinRequestsRequest(
                 peer=chat,
                 approved=True,
             ))
+            total_rounds += 1
+            timeouts = 0
+            log(f"Round {total_rounds} cleared (~{total_rounds * 100} approved so far)...")
+            # small pause between rounds to stay under Telegram's limits
+            await asyncio.sleep(DELAY_BETWEEN_ROUNDS)
+        except HideRequesterMissingError:
+            # Telegram's definitive "nothing left pending" signal.
+            finished = True
+            break
         except FloodWaitError as e:
-            log(f"Rate limited, waiting {e.seconds}s...")
+            log(f"Rate limited, waiting {e.seconds}s before continuing...")
             await asyncio.sleep(e.seconds)
             continue
+        except (TimeoutError, asyncio.TimeoutError):
+            timeouts += 1
+            if timeouts > 10:
+                log("Too many consecutive timeouts from Telegram -- stopping. Re-run later to continue.")
+                break
+            log(f"Telegram timed out (attempt {timeouts}/10), retrying in 10s...")
+            await asyncio.sleep(10)
+            continue
         except Exception as e:
-            log(f"Failed: {e}")
+            log(f"Unexpected error after {total_rounds} rounds: {e}")
+            log("Re-run the script to continue where this left off.")
             break
 
-        # hideAllChatJoinRequests only clears up to 100 per call, so
-        # check whether any are still pending and loop until none are.
-        await asyncio.sleep(1)
-        remaining = await client(functions.messages.GetChatInviteImportersRequest(
-            peer=chat,
-            link=None,
-            q="",
-            offset_date=0,
-            offset_user=types.InputUserEmpty(),
-            limit=1,
-            requested=True,
-        ))
-        log(f"Round {total_rounds}: cleared a batch, {len(remaining.importers)} still pending check...")
-        if not remaining.importers:
-            break
-
-    if total_rounds >= MAX_ROUNDS:
-        log(f"Stopped after {MAX_ROUNDS} rounds as a safety limit -- there may still be requests pending. Re-run the script to continue.")
+    if finished:
+        log(f"Done after {total_rounds} rounds. All pending join requests approved.")
+    elif total_rounds >= MAX_ROUNDS:
+        log(f"Stopped at the {MAX_ROUNDS}-round safety cap. Re-run to continue.")
     else:
-        log("Done. No pending join requests remain.")
+        log(f"Stopped early after {total_rounds} rounds -- re-run to approve the rest.")
 
     await client.disconnect()
 
